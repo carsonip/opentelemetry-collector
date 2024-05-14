@@ -119,9 +119,14 @@ func (bs *batchSender) exportActiveBatch() {
 }
 
 // isActiveBatchReady returns true if the active batch is ready to be exported.
-// The batch is ready if it has reached the minimum size or the concurrency limit is reached.
+// The batch is ready if there is a ready hint, has reached the minimum size or the concurrency limit is reached.
 // Caller must hold the lock.
 func (bs *batchSender) isActiveBatchReady() bool {
+	if request, ok := bs.activeBatch.request.(RequestReadyHint); ok {
+		if request.ReadyHint() {
+			return true
+		}
+	}
 	return bs.activeBatch.request.ItemsCount() >= bs.cfg.MinSizeItems ||
 		(bs.concurrencyLimit > 0 && bs.activeRequests.Load() >= bs.concurrencyLimit)
 }
