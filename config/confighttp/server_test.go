@@ -25,6 +25,7 @@ import (
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/component/componenttest"
 	"go.opentelemetry.io/collector/config/configauth"
+	"go.opentelemetry.io/collector/config/configmiddleware"
 	"go.opentelemetry.io/collector/config/confignet"
 	"go.opentelemetry.io/collector/config/configopaque"
 	"go.opentelemetry.io/collector/config/configoptional"
@@ -33,6 +34,8 @@ import (
 	"go.opentelemetry.io/collector/confmap/xconfmap"
 	"go.opentelemetry.io/collector/extension"
 	"go.opentelemetry.io/collector/extension/extensionauth"
+	"go.opentelemetry.io/collector/extension/extensionmiddleware"
+	"go.opentelemetry.io/collector/extension/extensionmiddleware/extensionmiddlewaretest"
 )
 
 var (
@@ -1023,18 +1026,53 @@ func TestHTTPServerTelemetry_Tracing(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/b/{bucket}/o/{objectname...}", func(http.ResponseWriter, *http.Request) {})
 
+	type testMiddlewareForTracing struct {
+		extension.Extension
+		extensionmiddleware.GetHTTPHandlerFunc
+	}
+
+	cloneMiddleware := &testMiddlewareForTracing{
+		Extension: extensionmiddlewaretest.NewNop(),
+		GetHTTPHandlerFunc: func(handler http.Handler) (http.Handler, error) {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				clonedReq := r.Clone(r.Context())
+				handler.ServeHTTP(w, clonedReq)
+			}), nil
+		},
+	}
+
+	extensions := map[component.ID]component.Component{
+		component.MustNewID("clone_middleware"): cloneMiddleware,
+	}
+
 	type testcase struct {
 		handler          http.Handler
+		extensions       map[component.ID]component.Component
+		middlewares      []configmiddleware.Config
 		expectedSpanName string
 	}
 
 	for name, testcase := range map[string]testcase{
 		"pattern": {
 			handler:          mux,
+			extensions:       nil,
+			middlewares:      nil,
 			expectedSpanName: "GET /b/{bucket}/o/{objectname...}",
 		},
 		"no_pattern": {
 			handler:          http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
+			extensions:       nil,
+			middlewares:      nil,
+			expectedSpanName: "GET",
+		},
+		"pattern_with_clone_middleware": {
+			handler:     mux,
+			extensions:  extensions,
+			middlewares: []configmiddleware.Config{{ID: component.MustNewID("clone_middleware")}},
+			// BUG: The server does not properly support cloned requests.
+			// When middleware clones the request, the Pattern field is set on the cloned
+			// request by the mux, but otelhttp reads Pattern from the original request,
+			// resulting in loss of the pattern in the span name.
 			expectedSpanName: "GET",
 		},
 	} {
@@ -1042,9 +1080,10 @@ func TestHTTPServerTelemetry_Tracing(t *testing.T) {
 			telemetry := componenttest.NewTelemetry()
 			config := NewDefaultServerConfig()
 			config.NetAddr.Endpoint = "localhost:0"
+			config.Middlewares = testcase.middlewares
 			srv, err := config.ToServer(
 				context.Background(),
-				nil,
+				testcase.extensions,
 				telemetry.NewTelemetrySettings(),
 				testcase.handler,
 			)
