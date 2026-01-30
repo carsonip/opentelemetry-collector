@@ -1073,7 +1073,7 @@ func TestHTTPServerTelemetry_Tracing(t *testing.T) {
 			// When middleware clones the request, the Pattern field is set on the cloned
 			// request by the mux, but otelhttp reads Pattern from the original request,
 			// resulting in loss of the pattern in the span name.
-			expectedSpanName: "GET",
+			expectedSpanName: "GET /b/{bucket}/o/{objectname...}",
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
